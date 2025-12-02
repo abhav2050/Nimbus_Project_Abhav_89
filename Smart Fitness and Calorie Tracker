@@ -1,1 +1,468 @@
 
+/*
+ * Smart Fitness and Calorie Tracker
+ * - Single-file C99 program
+ * - Features:
+ *    * Dynamic list of users (realloc)
+ *    * Each user has dynamic array of daily logs
+ *    * Functions for computations (net calories, averages)
+ *    * File handling (save/load to simple text format)
+ *    * Menu-driven CLI
+ *
+ * Compile:
+ *    gcc -std=c99 -Wall -Wextra -pedantic -o fitness fitness.c
+ *
+ * Run:
+ *    ./fitness
+ *
+ * File format used for save/load (text):
+ *   First line: number_of_users
+ *   For each user:
+ *     <name>\n
+ *     <daily_goal>\n
+ *     <num_logs>\n
+ *     For each log:
+ *       <date> <cal_in> <cal_burned>\n
+ *
+ * Note: Basic input validation only. For production code, strengthen parsing & error handling.
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+
+#define NAME_MAX 64
+#define DATE_MAX 16
+#define INITIAL_USER_CAP 4
+#define INITIAL_LOG_CAP 7
+#define SAVE_FILE "fitness_data.txt"
+
+/* --- Data structures --- */
+
+typedef struct {
+    char date[DATE_MAX];   /* e.g. "2025-11-30" */
+    int calories_in;
+    int calories_burned;
+} DayLog;
+
+typedef struct {
+    char name[NAME_MAX];
+    int daily_goal;        /* user target net calories (e.g., target caloric intake or deficit) */
+    DayLog *logs;          /* dynamic array of DayLog */
+    size_t num_logs;
+    size_t capacity_logs;
+} User;
+
+/* --- Function prototypes --- */
+
+/* Memory management */
+User *create_user_array(size_t *out_capacity);
+int add_user(User **users_ptr, size_t *num_users, size_t *capacity_users, const char *name, int daily_goal);
+void free_users(User *users, size_t num_users);
+
+/* Log management */
+int add_day_log(User *user, const char *date, int cal_in, int cal_burned);
+void print_user_summary(const User *user);
+double average_net_calories(const User *user);
+int total_net_calories(const User *user);
+
+/* Utility */
+int find_user_index(const User *users, size_t num_users, const char *name);
+void trim_newline(char *s);
+void clear_input_buffer(void);
+void pause_prompt(void);
+
+/* File I/O */
+int save_all_users(const User *users, size_t num_users, const char *filename);
+int load_all_users(User **users_ptr, size_t *num_users_ptr, size_t *capacity_ptr, const char *filename);
+
+/* Menu */
+void interactive_menu(User **users_ptr, size_t *num_users, size_t *capacity_users);
+
+/* --- Implementations --- */
+
+User *create_user_array(size_t *out_capacity) {
+    size_t cap = INITIAL_USER_CAP;
+    User *arr = malloc(sizeof(User) * cap);
+    if (!arr) {
+        fprintf(stderr, "Memory allocation failed for users.\n");
+        return NULL;
+    }
+    *out_capacity = cap;
+    return arr;
+}
+
+int add_user(User **users_ptr, size_t *num_users, size_t *capacity_users, const char *name, int daily_goal) {
+    if (!users_ptr || !num_users || !capacity_users) return -1;
+    /* Ensure capacity */
+    if (*num_users >= *capacity_users) {
+        size_t newcap = (*capacity_users) * 2;
+        User *tmp = realloc(*users_ptr, sizeof(User) * newcap);
+        if (!tmp) {
+            fprintf(stderr, "Failed to expand user list.\n");
+            return -1;
+        }
+        *users_ptr = tmp;
+        *capacity_users = newcap;
+    }
+    /* Initialize new user */
+    User *u = &((*users_ptr)[*num_users]);
+    strncpy(u->name, name, NAME_MAX-1);
+    u->name[NAME_MAX-1] = '\0';
+    u->daily_goal = daily_goal;
+    u->logs = malloc(sizeof(DayLog) * INITIAL_LOG_CAP);
+    if (!u->logs) {
+        fprintf(stderr, "Failed to allocate logs for user.\n");
+        return -1;
+    }
+    u->num_logs = 0;
+    u->capacity_logs = INITIAL_LOG_CAP;
+    (*num_users)++;
+    return 0;
+}
+
+void free_users(User *users, size_t num_users) {
+    if (!users) return;
+    for (size_t i = 0; i < num_users; ++i) {
+        free(users[i].logs);
+    }
+    free(users);
+}
+
+int add_day_log(User *user, const char *date, int cal_in, int cal_burned) {
+    if (!user || !date) return -1;
+    /* Expand logs array if needed */
+    if (user->num_logs >= user->capacity_logs) {
+        size_t newcap = user->capacity_logs * 2;
+        DayLog *tmp = realloc(user->logs, sizeof(DayLog) * newcap);
+        if (!tmp) {
+            fprintf(stderr, "Failed to expand logs for user %s\n", user->name);
+            return -1;
+        }
+        user->logs = tmp;
+        user->capacity_logs = newcap;
+    }
+    DayLog *log = &user->logs[user->num_logs++];
+    strncpy(log->date, date, DATE_MAX-1);
+    log->date[DATE_MAX-1] = '\0';
+    log->calories_in = cal_in;
+    log->calories_burned = cal_burned;
+    return 0;
+}
+
+int total_net_calories(const User *user) {
+    if (!user) return 0;
+    int total = 0;
+    for (size_t i = 0; i < user->num_logs; ++i) {
+        total += (user->logs[i].calories_in - user->logs[i].calories_burned);
+    }
+    return total;
+}
+
+double average_net_calories(const User *user) {
+    if (!user || user->num_logs == 0) return 0.0;
+    double total = (double) total_net_calories(user);
+    return total / (double) user->num_logs;
+}
+
+void print_user_summary(const User *user) {
+    if (!user) return;
+    printf("User: %s\n", user->name);
+    printf("Daily goal (net calories): %d\n", user->daily_goal);
+    printf("Number of logs: %zu\n", user->num_logs);
+    if (user->num_logs == 0) {
+        printf("No logs yet.\n");
+        return;
+    }
+    printf("Date        Intake  Burned  Net\n");
+    printf("--------------------------------\n");
+    for (size_t i = 0; i < user->num_logs; ++i) {
+        int net = user->logs[i].calories_in - user->logs[i].calories_burned;
+        printf("%-11s %6d  %6d  %5d\n", user->logs[i].date, user->logs[i].calories_in, user->logs[i].calories_burned, net);
+    }
+    int total_net = total_net_calories(user);
+    double avg_net = average_net_calories(user);
+    printf("--------------------------------\n");
+    printf("Total net calories: %d\n", total_net);
+    printf("Average net calories/day: %.2f\n", avg_net);
+    printf("Progress vs daily goal: ");
+    if (avg_net < user->daily_goal) {
+        printf("Below goal by %.2f on average.\n", (double)user->daily_goal - avg_net);
+    } else {
+        printf("Above/equal to goal by %.2f on average.\n", avg_net - (double)user->daily_goal);
+    }
+}
+
+/* Find user index by (case-insensitive) name; return -1 if not found */
+int find_user_index(const User *users, size_t num_users, const char *name) {
+    if (!users || !name) return -1;
+    for (size_t i = 0; i < num_users; ++i) {
+        /* case-insensitive compare */
+        const char *a = users[i].name;
+        const char *b = name;
+        size_t ia = 0, ib = 0;
+        int match = 1;
+        while (a[ia] && b[ib]) {
+            if (tolower((unsigned char)a[ia]) != tolower((unsigned char)b[ib])) { match = 0; break; }
+            ia++; ib++;
+        }
+        if (a[ia] != '\0' || b[ib] != '\0') match = 0;
+        if (match) return (int)i;
+    }
+    return -1;
+}
+
+void trim_newline(char *s) {
+    if (!s) return;
+    size_t len = strlen(s);
+    if (len == 0) return;
+    if (s[len-1] == '\n') s[len-1] = '\0';
+}
+
+/* consume rest of input line */
+void clear_input_buffer(void) {
+    int c;
+    while ((c = getchar()) != '\n' && c != EOF) { /* discard */ }
+}
+
+void pause_prompt(void) {
+    printf("Press Enter to continue...");
+    fflush(stdout);
+    getchar();
+}
+
+/* Save data in a simple text format */
+int save_all_users(const User *users, size_t num_users, const char *filename) {
+    if (!filename) return -1;
+    FILE *fp = fopen(filename, "w");
+    if (!fp) {
+        perror("fopen for save");
+        return -1;
+    }
+    fprintf(fp, "%zu\n", num_users);
+    for (size_t i = 0; i < num_users; ++i) {
+        fprintf(fp, "%s\n", users[i].name);
+        fprintf(fp, "%d\n", users[i].daily_goal);
+        fprintf(fp, "%zu\n", users[i].num_logs);
+        for (size_t j = 0; j < users[i].num_logs; ++j) {
+            fprintf(fp, "%s %d %d\n", users[i].logs[j].date, users[i].logs[j].calories_in, users[i].logs[j].calories_burned);
+        }
+    }
+    fclose(fp);
+    return 0;
+}
+
+/* Load users from file. On success, *users_ptr and *num_users_ptr updated. */
+int load_all_users(User **users_ptr, size_t *num_users_ptr, size_t *capacity_ptr, const char *filename) {
+    if (!filename || !users_ptr || !num_users_ptr || !capacity_ptr) return -1;
+    FILE *fp = fopen(filename, "r");
+    if (!fp) {
+        /* Not an error if file doesn't exist; caller may handle absence */
+        return -1;
+    }
+    size_t num_users_file = 0;
+    if (fscanf(fp, "%zu\n", &num_users_file) != 1) {
+        fclose(fp);
+        return -1;
+    }
+    User *users = malloc(sizeof(User) * (num_users_file > INITIAL_USER_CAP ? num_users_file : INITIAL_USER_CAP));
+    if (!users) { fclose(fp); return -1; }
+    size_t capacity = (num_users_file > INITIAL_USER_CAP ? num_users_file : INITIAL_USER_CAP);
+    size_t loaded = 0;
+    char line[256];
+    for (size_t i = 0; i < num_users_file; ++i) {
+        /* read name line (may include spaces) */
+        if (!fgets(line, sizeof(line), fp)) { break; }
+        trim_newline(line);
+        if (strlen(line) == 0) { /* if blank line, try again */ i--; continue; }
+        strncpy(users[loaded].name, line, NAME_MAX-1);
+        users[loaded].name[NAME_MAX-1] = '\0';
+        /* read goal */
+        int goal = 0;
+        if (fscanf(fp, "%d\n", &goal) != 1) { break; }
+        users[loaded].daily_goal = goal;
+        size_t num_logs = 0;
+        if (fscanf(fp, "%zu\n", &num_logs) != 1) { break; }
+        users[loaded].num_logs = 0;
+        users[loaded].capacity_logs = (num_logs > INITIAL_LOG_CAP ? num_logs : INITIAL_LOG_CAP);
+        users[loaded].logs = malloc(sizeof(DayLog) * users[loaded].capacity_logs);
+        if (!users[loaded].logs) { break; }
+        for (size_t j = 0; j < num_logs; ++j) {
+            DayLog temp;
+            if (fscanf(fp, "%15s %d %d\n", temp.date, &temp.calories_in, &temp.calories_burned) != 3) {
+                /* Clean up partially loaded user logs */
+                free(users[loaded].logs);
+                users[loaded].logs = NULL;
+                break;
+            }
+            users[loaded].logs[users[loaded].num_logs++] = temp;
+        }
+        loaded++;
+    }
+    fclose(fp);
+    /* On success, replace pointers */
+    *users_ptr = users;
+    *num_users_ptr = loaded;
+    *capacity_ptr = capacity;
+    return 0;
+}
+
+/* Interactive menu UI */
+void interactive_menu(User **users_ptr, size_t *num_users, size_t *capacity_users) {
+    if (!users_ptr || !num_users || !capacity_users) return;
+    int running = 1;
+    while (running) {
+        printf("\n=== Smart Fitness & Calorie Tracker ===\n");
+        printf("Users: %zu\n", *num_users);
+        printf("1) Create new user\n");
+        printf("2) Add daily log for user\n");
+        printf("3) Show user summary\n");
+        printf("4) List all users\n");
+        printf("5) Save data to file (%s)\n", SAVE_FILE);
+        printf("6) Load data from file (%s) [replaces current in-memory data]\n", SAVE_FILE);
+        printf("7) Delete user\n");
+        printf("0) Exit\n");
+        printf("Select option: ");
+        int opt = -1;
+        if (scanf("%d", &opt) != 1) { clear_input_buffer(); printf("Invalid input.\n"); continue; }
+        clear_input_buffer();
+        if (opt == 1) {
+            char name[NAME_MAX];
+            int goal;
+            printf("Enter user name: ");
+            if (!fgets(name, sizeof(name), stdin)) { printf("Input error.\n"); continue; }
+            trim_newline(name);
+            if (strlen(name) == 0) { printf("Name cannot be empty.\n"); continue; }
+            printf("Enter daily net calories goal (integer): ");
+            if (scanf("%d", &goal) != 1) { clear_input_buffer(); printf("Invalid goal.\n"); continue; }
+            clear_input_buffer();
+            if (find_user_index(*users_ptr, *num_users, name) != -1) {
+                printf("User with that name already exists.\n");
+                continue;
+            }
+            if (add_user(users_ptr, num_users, capacity_users, name, goal) == 0) {
+                printf("User '%s' created.\n", name);
+            } else {
+                printf("Failed to create user.\n");
+            }
+        } else if (opt == 2) {
+            if (*num_users == 0) { printf("No users. Create a user first.\n"); continue; }
+            char name[NAME_MAX];
+            char date[DATE_MAX];
+            int in, burned;
+            printf("Enter user name to add log for: ");
+            if (!fgets(name, sizeof(name), stdin)) { continue; }
+            trim_newline(name);
+            int idx = find_user_index(*users_ptr, *num_users, name);
+            if (idx < 0) { printf("User not found.\n"); continue; }
+            printf("Enter date (YYYY-MM-DD): ");
+            if (!fgets(date, sizeof(date), stdin)) { continue; }
+            trim_newline(date);
+            if (strlen(date) == 0) { printf("Date required.\n"); continue; }
+            printf("Calories consumed (integer): ");
+            if (scanf("%d", &in) != 1) { clear_input_buffer(); printf("Invalid number.\n"); continue; }
+            clear_input_buffer();
+            printf("Calories burned (integer): ");
+            if (scanf("%d", &burned) != 1) { clear_input_buffer(); printf("Invalid number.\n"); continue; }
+            clear_input_buffer();
+            if (add_day_log(&((*users_ptr)[idx]), date, in, burned) == 0) {
+                printf("Log added for %s on %s\n", name, date);
+            } else {
+                printf("Failed to add log.\n");
+            }
+        } else if (opt == 3) {
+            if (*num_users == 0) { printf("No users.\n"); continue; }
+            char name[NAME_MAX];
+            printf("Enter user name to show summary: ");
+            if (!fgets(name, sizeof(name), stdin)) continue;
+            trim_newline(name);
+            int idx = find_user_index(*users_ptr, *num_users, name);
+            if (idx < 0) { printf("User not found.\n"); continue; }
+            print_user_summary(&((*users_ptr)[idx]));
+            pause_prompt();
+        } else if (opt == 4) {
+            if (*num_users == 0) { printf("No users.\n"); continue; }
+            printf("Existing users:\n");
+            for (size_t i = 0; i < *num_users; ++i) {
+                printf(" - %s (goal=%d, logs=%zu)\n", (*users_ptr)[i].name, (*users_ptr)[i].daily_goal, (*users_ptr)[i].num_logs);
+            }
+        } else if (opt == 5) {
+            if (*num_users == 0) { printf("No users to save.\n"); continue; }
+            if (save_all_users(*users_ptr, *num_users, SAVE_FILE) == 0) {
+                printf("Saved %zu user(s) to '%s'\n", *num_users, SAVE_FILE);
+            } else {
+                printf("Failed to save data.\n");
+            }
+        } else if (opt == 6) {
+            /* free existing memory then load */
+            free_users(*users_ptr, *num_users);
+            *users_ptr = NULL;
+            *num_users = 0;
+            *capacity_users = 0;
+            if (load_all_users(users_ptr, num_users, capacity_users, SAVE_FILE) == 0) {
+                printf("Loaded %zu users from '%s'\n", *num_users, SAVE_FILE);
+            } else {
+                printf("Failed to load from '%s' (file may not exist or be corrupted).\n", SAVE_FILE);
+                /* recreate default array */
+                *users_ptr = create_user_array(capacity_users);
+                *num_users = 0;
+            }
+        } else if (opt == 7) {
+            if (*num_users == 0) { printf("No users to delete.\n"); continue; }
+            char name[NAME_MAX];
+            printf("Enter user name to delete: ");
+            if (!fgets(name, sizeof(name), stdin)) continue;
+            trim_newline(name);
+            int idx = find_user_index(*users_ptr, *num_users, name);
+            if (idx < 0) { printf("User not found.\n"); continue; }
+            /* free logs and shift users left */
+            free((*users_ptr)[idx].logs);
+            for (size_t j = idx; j + 1 < *num_users; ++j) {
+                (*users_ptr)[j] = (*users_ptr)[j+1];
+            }
+            (*num_users)--;
+            printf("Deleted user '%s'\n", name);
+        } else if (opt == 0) {
+            running = 0;
+            printf("Exiting.\n");
+        } else {
+            printf("Unknown option.\n");
+        }
+    }
+}
+
+/* --- Main --- */
+
+int main(void) {
+    size_t capacity_users;
+    User *users = create_user_array(&capacity_users);
+    if (!users) return EXIT_FAILURE;
+    size_t num_users = 0;
+
+    /* Attempt to load existing file at startup (optional) */
+    if (load_all_users(&users, &num_users, &capacity_users, SAVE_FILE) == 0) {
+        printf("Loaded %zu user(s) from '%s'.\n", num_users, SAVE_FILE);
+    } else {
+        /* If load failed, ensure we have an allocated array (create_user_array already did).
+           If load replaced pointer, it's already set; else we keep initial empty array. */
+        /* No message here to keep startup clean. */
+    }
+
+    interactive_menu(&users, &num_users, &capacity_users);
+
+    /* On exit, save optionally */
+    printf("Do you want to save data before exit? (y/n): ");
+    int c = getchar();
+    clear_input_buffer();
+    if (c == 'y' || c == 'Y') {
+        if (save_all_users(users, num_users, SAVE_FILE) == 0) {
+            printf("Saved data to '%s'\n", SAVE_FILE);
+        } else {
+            printf("Failed to save data.\n");
+        }
+    }
+
+    free_users(users, num_users);
+    return EXIT_SUCCESS;
+}
